@@ -3,13 +3,16 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
+    "predev": "node scripts/vendor-mermaid.mjs",
     "dev": "next dev",
+    "prebuild": "node scripts/vendor-mermaid.mjs",
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
-    "mock:ai": "node scripts/mock-ollama.mjs"
+    "mock:ai": "node scripts/mock-ollama.mjs",
+    "postinstall": "node scripts/vendor-mermaid.mjs"
   },
   "dependencies": {
     "katex": "^0.16.47",

@@ -73,6 +73,7 @@ mindMapCode → separate React states
 | `src/lib/ai/normalize.ts` | JSON extraction, LaTeX-escape repair, schema coercion |
 | `src/lib/text/chunking.ts` | Boundary-aware, balanced, lossless word chunker |
 | `src/lib/mindmap.ts` | Mermaid mindmap sanitiser / merger / notes-derived fallback |
+| `scripts/vendor-mermaid.mjs` | Copies Mermaid's prebuilt browser file to `public/vendor/` (runs on install, dev and build) so the bundler never has to process it |
 | `src/app/components/Dashboard.tsx` | Main UI: drop zone, tier toggle, processing steps, tabs |
 | `src/app/components/tabs/*` | Deep Notes, Flashcards, Quiz, Mind Map |
 
@@ -151,4 +152,5 @@ npm run mock:ai    # mock Ollama server
 * Self-host next to (or on the same private network as) the AI server: `npm run build && npm start`, behind a reverse proxy. Disable response buffering for `/api/generate` (the route already sends `X-Accel-Buffering: no` and heartbeats every 15 s).
 * Serverless hosts cap request duration (`maxDuration` is set to 300 s) and usually can't reach a private GPU box, so they are a poor fit for long lectures.
 * The rate limiter is in-memory; with several replicas, rate-limit at the proxy instead.
+* Mermaid is served from `public/vendor/mermaid.min.js` instead of being bundled. Bundling it needed over 2 GB of memory and crashed builds on smaller machines; the file is regenerated automatically and is git-ignored.
 * Generated suites are cached only in the student's own browser (`localStorage`) so a refresh doesn't lose work.

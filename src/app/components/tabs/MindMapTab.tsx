@@ -7,8 +7,13 @@ import { sanitizeMindmap } from "@/lib/mindmap";
 import { slugFile } from "./DeepNotesTab";
 
 /* ------------------------------------------------------------------ */
-/* Mermaid is ~1 MB: load it once, lazily, with our dark palette.      */
+/* Mermaid is loaded at runtime from its prebuilt browser bundle      */
+/* (copied to public/vendor by scripts/vendor-mermaid.mjs) instead of  */
+/* being bundled: it is several MB and exhausts the bundler's memory   */
+/* on smaller machines. Only the type import below touches the package.*/
 /* ------------------------------------------------------------------ */
+
+const MERMAID_SRC = "/vendor/mermaid.min.js";
 
 let mermaidPromise: Promise<Mermaid> | null = null;
 
@@ -17,9 +22,26 @@ const BRANCH_COLORS = [
   "#4f46e5", "#0d9488", "#9333ea", "#e11d48", "#65a30d", "#0284c7",
 ];
 
+function loadMermaidScript(): Promise<Mermaid> {
+  const global = window as unknown as { mermaid?: Mermaid };
+  if (global.mermaid) return Promise.resolve(global.mermaid);
+  return new Promise((resolve, reject) => {
+    const script = document.createElement("script");
+    script.src = MERMAID_SRC;
+    script.async = true;
+    script.onload = () =>
+      global.mermaid ? resolve(global.mermaid) : reject(new Error("The mind map engine did not initialise."));
+    script.onerror = () => {
+      script.remove(); // allow a clean retry later
+      reject(new Error("Could not load the mind map engine."));
+    };
+    document.head.append(script);
+  });
+}
+
 export function loadMermaid(): Promise<Mermaid> {
   if (!mermaidPromise) {
-    mermaidPromise = import("mermaid").then(({ default: mermaid }) => {
+    mermaidPromise = loadMermaidScript().then((mermaid) => {
       const themeVariables: Record<string, string | boolean> = {
         darkMode: true,
         background: "#080a14",
@@ -48,6 +70,9 @@ export function loadMermaid(): Promise<Mermaid> {
         mindmap: { padding: 18, maxNodeWidth: 240 },
       });
       return mermaid;
+    });
+    mermaidPromise.catch(() => {
+      mermaidPromise = null; // a failed load (e.g. offline) can be retried
     });
   }
   return mermaidPromise;
