@@ -1,12 +1,8 @@
 import "server-only";
 
 import type { ApiErrorBody } from "../types";
-import { ModelOutputError } from "./normalize";
-import { AITimeoutError, AIUnavailableError, AIUpstreamError } from "./ollama";
-
-export const WARMING_UP_MESSAGE = "Our private AI server is warming up. Please give it a few moments!";
-
-const exposeDetails = process.env.NODE_ENV !== "production";
+import { UnauthorizedError } from "../auth/dal";
+import { NotFoundError } from "../data/projects";
 
 export const NO_STORE = { "Cache-Control": "no-store" } as const;
 
@@ -14,49 +10,43 @@ export function jsonError(status: number, body: ApiErrorBody, headers: Record<st
   return Response.json(body, { status, headers: { ...NO_STORE, ...headers } });
 }
 
-export function isAbortError(err: unknown): boolean {
-  return err instanceof Error && err.name === "AbortError";
+/** Map common failures in route handlers to JSON errors. */
+export function handleRouteError(err: unknown): Response {
+  if (err instanceof UnauthorizedError) return jsonError(401, { error: err.message, code: "UNAUTHORIZED" });
+  if (err instanceof NotFoundError) return jsonError(404, { error: err.message, code: "NOT_FOUND" });
+  console.error("[study-suite] route error", err);
+  return jsonError(500, { error: "Something went wrong. Please try again.", code: "INTERNAL_ERROR" });
 }
 
-/** Map pipeline failures to student-friendly HTTP errors. Internals are logged, not leaked. */
-export function toErrorResponse(err: unknown): { status: number; body: ApiErrorBody } {
-  const withDetail = (body: ApiErrorBody, detail?: string): ApiErrorBody =>
-    exposeDetails && detail ? { ...body, detail } : body;
+/** Read a JSON body with a size cap. */
+export async function readJson(request: Request, maxBytes: number): Promise<unknown> {
+  const declared = Number(request.headers.get("content-length") ?? 0);
+  if (declared > maxBytes) throw new PayloadTooLargeError();
+  const raw = await request.text();
+  if (raw.length > maxBytes) throw new PayloadTooLargeError();
+  try {
+    return JSON.parse(raw);
+  } catch {
+    throw new BadRequestError("Request body must be valid JSON.");
+  }
+}
 
-  if (err instanceof AIUnavailableError) {
-    console.warn(`[study-suite] AI unavailable (${err.code}): ${err.detail}`);
-    return { status: 503, body: withDetail({ error: WARMING_UP_MESSAGE, code: err.code }, err.detail) };
+export class BadRequestError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "BadRequestError";
   }
-  if (err instanceof AITimeoutError) {
-    console.warn("[study-suite] AI request timed out");
-    return {
-      status: 504,
-      body: {
-        error: "The private AI server took too long on this material. Please try again, or split it into smaller parts.",
-        code: "AI_TIMEOUT",
-      },
-    };
+}
+
+export class PayloadTooLargeError extends Error {
+  constructor() {
+    super("That's too much material for one upload. Please split it into smaller parts.");
+    this.name = "PayloadTooLargeError";
   }
-  if (err instanceof ModelOutputError) {
-    console.warn(`[study-suite] unusable model output: ${err.message}`);
-    return {
-      status: 502,
-      body: withDetail(
-        { error: "The AI returned an unreadable study suite. Please try again.", code: "MODEL_OUTPUT_INVALID" },
-        err.message,
-      ),
-    };
-  }
-  if (err instanceof AIUpstreamError) {
-    console.error(`[study-suite] AI upstream error ${err.status}: ${err.detail}`);
-    return {
-      status: 502,
-      body: withDetail(
-        { error: "The private AI server reported an error. Please try again in a moment.", code: "AI_UPSTREAM_ERROR" },
-        err.detail,
-      ),
-    };
-  }
-  console.error("[study-suite] unexpected pipeline error", err);
-  return { status: 500, body: { error: "Something went wrong while building your study suite.", code: "INTERNAL_ERROR" } };
+}
+
+export function handleInputError(err: unknown): Response | null {
+  if (err instanceof BadRequestError) return jsonError(400, { error: err.message, code: "BAD_REQUEST" });
+  if (err instanceof PayloadTooLargeError) return jsonError(413, { error: err.message, code: "PAYLOAD_TOO_LARGE" });
+  return null;
 }

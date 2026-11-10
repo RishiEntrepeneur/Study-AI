@@ -60,11 +60,11 @@ function rehypeHeadingIds() {
 /* ------------------------------------------------------------------ */
 
 const BADGES: Record<string, { icon: LucideIcon; className: string }> = {
-  mechanics: { icon: Cog, className: "border-sky-400/30 bg-sky-400/10 text-sky-200" },
-  analogy: { icon: Lightbulb, className: "border-amber-400/30 bg-amber-400/10 text-amber-200" },
-  "blind spot": { icon: EyeOff, className: "border-rose-400/35 bg-rose-500/10 text-rose-200" },
-  derivation: { icon: FlaskConical, className: "border-emerald-400/30 bg-emerald-400/10 text-emerald-200" },
-  example: { icon: FlaskConical, className: "border-emerald-400/30 bg-emerald-400/10 text-emerald-200" },
+  mechanics: { icon: Cog, className: "border-accent/30 bg-accent-soft text-accent" },
+  analogy: { icon: Lightbulb, className: "border-warn/30 bg-warn-soft text-warn" },
+  "blind spot": { icon: EyeOff, className: "border-bad/30 bg-bad-soft text-bad" },
+  derivation: { icon: FlaskConical, className: "border-good/30 bg-good-soft text-good" },
+  example: { icon: FlaskConical, className: "border-good/30 bg-good-soft text-good" },
 };
 
 function plainText(children: ReactNode): string {
@@ -86,7 +86,7 @@ const blockComponents: Components = {
     const Icon = badge.icon;
     return (
       <span
-        className={`not-prose mr-0.5 inline-flex translate-y-[-1px] items-center gap-1 rounded-md border px-1.5 py-px align-middle text-[0.72rem] font-semibold tracking-wide uppercase ${badge.className}`}
+        className={`not-prose mr-0.5 inline-flex translate-y-[-1px] items-center gap-1 rounded border px-1.5 py-px align-middle font-sans text-[0.68rem] font-semibold tracking-wide not-italic uppercase ${badge.className}`}
       >
         <Icon className="size-3" aria-hidden />
         {children}
@@ -94,8 +94,8 @@ const blockComponents: Components = {
     );
   },
   table: ({ children }) => (
-    <div className="not-prose my-5 overflow-x-auto rounded-xl border border-white/10">
-      <table className="w-full border-collapse text-left text-sm [&_td]:border-t [&_td]:border-white/5 [&_td]:px-3 [&_td]:py-2 [&_th]:bg-white/5 [&_th]:px-3 [&_th]:py-2 [&_th]:font-semibold">
+    <div className="not-prose my-5 overflow-x-auto rounded-md border border-line">
+      <table className="w-full border-collapse text-left font-sans text-sm [&_td]:border-t [&_td]:border-line [&_td]:px-3 [&_td]:py-2 [&_th]:bg-subtle [&_th]:px-3 [&_th]:py-2 [&_th]:font-semibold">
         {children}
       </table>
     </div>

@@ -4,12 +4,12 @@ import { Agent, fetch as undiciFetch, type Response as UndiciResponse } from "un
 import type { AIConfig } from "./config";
 
 /**
- * Minimal Ollama client (POST /api/chat, GET /api/tags) built for long jobs.
+ * Minimal Ollama client (GET /api/tags, POST /api/show, streaming POST /api/chat)
+ * built for long jobs on modest hardware.
  *
  * Header/body timeouts are disabled on purpose: a CPU-only server can spend
- * several minutes evaluating an 8,000-word prompt before the first token
- * arrives, and Node's default 300 s header timeout would misreport that as an
- * outage. An overall deadline is enforced with AbortSignal instead.
+ * minutes evaluating a long prompt before the first token arrives. An overall
+ * deadline is enforced with AbortSignal instead.
  */
 const dispatcher = new Agent({
   headersTimeout: 0,
@@ -18,7 +18,7 @@ const dispatcher = new Agent({
   keepAliveTimeout: 30_000,
 });
 
-/** The AI server can't be reached or can't serve the model right now (→ HTTP 503). */
+/** The AI server can't be reached or can't serve the model right now. */
 export class AIUnavailableError extends Error {
   constructor(
     public readonly detail: string,
@@ -29,7 +29,7 @@ export class AIUnavailableError extends Error {
   }
 }
 
-/** The AI server answered with an unexpected error (→ HTTP 502). */
+/** The AI server answered with an unexpected error. */
 export class AIUpstreamError extends Error {
   constructor(
     public readonly status: number,
@@ -40,7 +40,15 @@ export class AIUpstreamError extends Error {
   }
 }
 
-/** A single model call exceeded AI_REQUEST_TIMEOUT_MS (→ HTTP 504). */
+/** The machine running the model doesn't have enough free memory for this request. */
+export class AIMemoryError extends AIUpstreamError {
+  constructor(detail: string) {
+    super(500, detail);
+    this.name = "AIMemoryError";
+  }
+}
+
+/** A single model call exceeded AI_REQUEST_TIMEOUT_MS. */
 export class AITimeoutError extends Error {
   constructor() {
     super("The private AI server took too long to respond.");
@@ -53,7 +61,10 @@ const NETWORK_CODES = new Set([
   "UND_ERR_CONNECT_TIMEOUT", "UND_ERR_SOCKET", "UND_ERR_CLOSED",
 ]);
 
-function isAbort(err: unknown): boolean {
+const MEMORY_PATTERN =
+  /requires more system memory|more memory than is available|out of memory|insufficient memory|not enough memory|failed to allocate|cudaMalloc|unable to allocate|memory allocation|OOM/i;
+
+export function isAbortError(err: unknown): boolean {
   return err instanceof Error && err.name === "AbortError";
 }
 
@@ -68,11 +79,21 @@ function isNetworkError(err: unknown): boolean {
   return err.name === "TypeError" && /fetch failed|terminated|network/i.test(err.message);
 }
 
-function rethrowTransport(err: unknown): never {
+function rethrowTransport(err: unknown, signal?: AbortSignal): never {
+  if (signal?.aborted && !isTimeout(signal.reason)) throw signal.reason ?? err;
   if (isTimeout(err)) throw new AITimeoutError();
-  if (isAbort(err)) throw err;
+  if (isAbortError(err)) throw err;
   if (isNetworkError(err)) throw new AIUnavailableError("Could not connect to the private AI server.");
   throw err;
+}
+
+function upstreamError(status: number, detail: string, model: string): Error {
+  if (MEMORY_PATTERN.test(detail)) return new AIMemoryError(detail);
+  if (status === 404 && /not found|pull/i.test(detail)) {
+    return new AIUnavailableError(`Model "${model}" is not installed on the AI server (run: ollama pull ${model}).`, "MODEL_NOT_FOUND");
+  }
+  if (status === 502 || status === 503 || status === 504) return new AIUnavailableError(detail, "AI_BUSY");
+  return new AIUpstreamError(status, detail);
 }
 
 function headers(cfg: AIConfig): Record<string, string> {
@@ -117,7 +138,7 @@ export async function checkServer(cfg: AIConfig, signal?: AbortSignal, timeoutMs
     });
   } catch (err) {
     if (isTimeout(err)) throw new AIUnavailableError("The private AI server did not answer the health probe in time.");
-    rethrowTransport(err);
+    rethrowTransport(err, signal);
   }
   if (!res.ok) {
     throw new AIUnavailableError(`Health probe failed: ${await errorText(res)}`, res.status === 503 ? "AI_BUSY" : "AI_UNREACHABLE");
@@ -127,46 +148,118 @@ export async function checkServer(cfg: AIConfig, signal?: AbortSignal, timeoutMs
   return { models, modelInstalled: models.some((name) => modelMatches(name, cfg.model)) };
 }
 
-export interface ChatJSONParams {
+/* -------------------------------------------------------------------------- */
+/* Model capabilities (thinking models need `think: false`)                   */
+/* -------------------------------------------------------------------------- */
+
+const capabilityCache = new Map<string, Promise<string[]>>();
+
+async function fetchCapabilities(cfg: AIConfig): Promise<string[]> {
+  try {
+    const res = await undiciFetch(`${cfg.baseUrl}/api/show`, {
+      method: "POST",
+      headers: headers(cfg),
+      body: JSON.stringify({ model: cfg.model }),
+      signal: AbortSignal.timeout(10_000),
+      dispatcher,
+    });
+    if (!res.ok) return [];
+    const data = (await res.json()) as { capabilities?: unknown };
+    return Array.isArray(data.capabilities) ? data.capabilities.filter((c): c is string => typeof c === "string") : [];
+  } catch {
+    return []; // older servers: assume a plain chat model
+  }
+}
+
+export function getCapabilities(cfg: AIConfig): Promise<string[]> {
+  const key = `${cfg.baseUrl}|${cfg.model}`;
+  let entry = capabilityCache.get(key);
+  if (!entry) {
+    entry = fetchCapabilities(cfg);
+    capabilityCache.set(key, entry);
+    // Don't cache failures forever: re-check after a minute.
+    entry.then((caps) => caps.length === 0 && setTimeout(() => capabilityCache.delete(key), 60_000));
+  }
+  return entry;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Streaming chat                                                             */
+/* -------------------------------------------------------------------------- */
+
+export interface ChatMessageParam {
+  role: "system" | "user" | "assistant";
+  content: string;
+}
+
+export interface ChatParams {
   cfg: AIConfig;
-  system: string;
-  user: string;
-  /** JSON schema for Ollama structured outputs; falls back to plain JSON mode on old servers. */
-  schema?: object;
-  numCtx?: number;
-  numPredict?: number;
+  messages: ChatMessageParam[];
+  /** JSON schema (structured output) or "json"; omit for free text. */
+  format?: object | "json";
+  numCtx: number;
+  numPredict: number;
+  temperature?: number;
   signal?: AbortSignal;
+  /** Called with each streamed text piece (after any <think> block is removed). */
+  onText?: (piece: string) => void;
   /** Called periodically with the number of streamed tokens so far. */
   onProgress?: (tokens: number) => void;
 }
 
-export interface ChatJSONResult {
+export interface ChatResult {
   content: string;
   doneReason?: string;
   tokens: number;
 }
 
-/** Stream a JSON-mode chat completion from Ollama and return the full text. */
-export async function chatJSON(params: ChatJSONParams): Promise<ChatJSONResult> {
-  const { cfg, schema, signal, onProgress } = params;
+/** Hides a leading <think>…</think> block from a streamed answer. */
+class ThinkFilter {
+  private buffer = "";
+  private state: "start" | "thinking" | "passthrough" = "start";
+
+  push(piece: string): string {
+    if (this.state === "passthrough") return piece;
+    this.buffer += piece;
+    if (this.state === "start") {
+      const trimmed = this.buffer.trimStart();
+      if (trimmed.length < 7 && "<think>".startsWith(trimmed)) return "";
+      if (!trimmed.startsWith("<think>")) {
+        this.state = "passthrough";
+        const out = this.buffer;
+        this.buffer = "";
+        return out;
+      }
+      this.state = "thinking";
+    }
+    const end = this.buffer.indexOf("</think>");
+    if (end === -1) return "";
+    const rest = this.buffer.slice(end + 8).replace(/^\s+/, "");
+    this.buffer = "";
+    this.state = "passthrough";
+    return rest;
+  }
+}
+
+export async function chat(params: ChatParams): Promise<ChatResult> {
+  const { cfg, signal, onProgress, onText } = params;
   const deadline = AbortSignal.timeout(cfg.requestTimeoutMs);
   const combined = signal ? AbortSignal.any([signal, deadline]) : deadline;
+  const capabilities = await getCapabilities(cfg);
 
-  const body = {
+  const body: Record<string, unknown> = {
     model: cfg.model,
-    messages: [
-      { role: "system", content: params.system },
-      { role: "user", content: params.user },
-    ],
+    messages: params.messages,
     stream: true,
-    format: schema ?? "json",
     keep_alive: cfg.keepAlive,
     options: {
-      temperature: cfg.temperature,
-      num_ctx: params.numCtx ?? cfg.numCtx,
-      num_predict: params.numPredict ?? cfg.numPredict,
+      temperature: params.temperature ?? cfg.temperature,
+      num_ctx: params.numCtx,
+      num_predict: params.numPredict,
     },
   };
+  if (params.format) body.format = params.format;
+  if (capabilities.includes("thinking")) body.think = false;
 
   const post = (payload: unknown) =>
     undiciFetch(`${cfg.baseUrl}/api/chat`, {
@@ -180,32 +273,29 @@ export async function chatJSON(params: ChatJSONParams): Promise<ChatJSONResult> 
   let res: UndiciResponse;
   try {
     res = await post(body);
-    // Ollama < 0.5 doesn't accept a JSON schema in `format`; retry with classic JSON mode.
-    if (res.status === 400 && schema) {
+    // Older servers don't accept a JSON schema in `format` (or the `think` flag); retry in classic JSON mode.
+    if (res.status === 400) {
       const detail = await errorText(res);
-      if (!/format|schema/i.test(detail)) throw new AIUpstreamError(400, detail);
-      res = await post({ ...body, format: "json" });
+      if (/format|schema|think/i.test(detail)) {
+        const fallback = { ...body };
+        delete fallback.think;
+        if (typeof params.format === "object") fallback.format = "json";
+        res = await post(fallback);
+      } else {
+        throw upstreamError(400, detail, cfg.model);
+      }
     }
   } catch (err) {
-    if (err instanceof AIUpstreamError) throw err;
-    rethrowTransport(err);
+    if (err instanceof AIUpstreamError || err instanceof AIUnavailableError) throw err;
+    rethrowTransport(err, signal);
   }
 
-  if (!res.ok) {
-    const detail = await errorText(res);
-    if (res.status === 404) {
-      throw new AIUnavailableError(
-        `Model "${cfg.model}" is not installed on the AI server (run: ollama pull ${cfg.model}). ${detail}`,
-        "MODEL_NOT_FOUND",
-      );
-    }
-    if (res.status === 502 || res.status === 503 || res.status === 504) throw new AIUnavailableError(detail, "AI_BUSY");
-    throw new AIUpstreamError(res.status, detail);
-  }
-  if (!res.body) throw new AIUpstreamError(502, "The AI server returned an empty body.");
+  if (!res.ok) throw upstreamError(res.status, await errorText(res), cfg.model);
+  if (!res.body) throw new AIUpstreamError(502, "The AI server returned an empty response.");
 
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
+  const think = new ThinkFilter();
   let buffer = "";
   let content = "";
   let tokens = 0;
@@ -219,16 +309,18 @@ export async function chatJSON(params: ChatJSONParams): Promise<ChatJSONResult> 
     try {
       chunk = JSON.parse(trimmed);
     } catch {
-      return; // ignore keep-alive noise
+      return; // keep-alive noise
     }
-    if (chunk.error) throw new AIUpstreamError(500, chunk.error);
+    if (chunk.error) throw upstreamError(500, chunk.error, cfg.model);
     const piece = chunk.message?.content ?? chunk.response ?? "";
     if (piece) {
       content += piece;
       tokens++;
+      const visible = think.push(piece);
+      if (visible) onText?.(visible);
     }
     if (chunk.done) doneReason = chunk.done_reason;
-    if (onProgress && tokens - lastReported >= 32) {
+    if (onProgress && tokens - lastReported >= 24) {
       lastReported = tokens;
       onProgress(tokens);
     }
@@ -249,8 +341,8 @@ export async function chatJSON(params: ChatJSONParams): Promise<ChatJSONResult> 
     buffer += decoder.decode();
     handleLine(buffer);
   } catch (err) {
-    if (err instanceof AIUpstreamError) throw err;
-    rethrowTransport(err);
+    if (err instanceof AIUpstreamError || err instanceof AIUnavailableError) throw err;
+    rethrowTransport(err, signal);
   } finally {
     reader.releaseLock();
   }

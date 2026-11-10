@@ -1,156 +1,126 @@
 # Superpower Study Suite
 
-A dark-mode Next.js dashboard that turns any lecture (transcripts, notes, PDFs, DOCX) into a **Master Study Suite**:
+A private study space. Type what you want to learn (or bring lecture notes, a recording, a PDF or a Word file), pick what you want, and the app creates it with **your own AI model** running on your computer through Ollama. No API keys, no subscription, and nothing you study leaves your machine.
 
-| Tab | What students get |
+**What you can create (pick any combination):**
+
+| Output | What it is |
 | --- | --- |
-| **Deep Notes** | Exhaustive Markdown notes (concept → *Mechanics* / *Analogy* / *Blind Spot*) with KaTeX-typeset LaTeX and a live outline |
-| **Flashcards** | Full-screen 3D click-to-flip cards with Back/Next, shuffle, focus mode and keyboard shortcuts |
-| **Interactive Quiz** | One question at a time, instant emerald/crimson feedback, explanation reveal and a live scoreboard |
-| **Visual Mind Map** | Mermaid.js mind map on a pan/zoom canvas with fit-to-view, focus mode, SVG export and source view |
+| Notes | Textbook-style notes: definition, how it works, an analogy and the "blind spot" for every concept, with real math typesetting. Editable, and can be read aloud. |
+| Cheat sheet | One page of key ideas, formulas, must-know facts and common mistakes. |
+| Flashcards | Index cards you flip, plus **spaced repetition**: each card comes back right before you'd forget it. |
+| Quiz | Multiple-choice questions with instant feedback, explanations and score history. |
+| Mind map | A zoomable, pannable map of how the ideas connect. |
+| Key terms | A searchable glossary. |
 
-Students never need an API key. All inference runs on **your own private AI server** (e.g. Ollama + `llama3.1`), configured through server-side environment variables only.
-
----
-
-## Quick start
-
-```bash
-cp .env.example .env.local      # point PRIVATE_AI_URL / AI_MODEL_NAME at your server
-npm install
-npm run dev                     # http://localhost:3000
-```
-
-### Running against a real Ollama server
-
-```bash
-ollama pull llama3.1
-ollama serve                    # listens on http://localhost:11434 by default
-```
-
-If Ollama runs on another machine, start it with `OLLAMA_HOST=0.0.0.0` and set `PRIVATE_AI_URL=http://<gpu-host>:11434`. Keep that port private to your network. If you put Ollama behind an authenticating reverse proxy, set `PRIVATE_AI_API_KEY` and it is sent as a Bearer token.
-
-### Trying it without a GPU (mock AI server)
-
-```bash
-npm run mock:ai                                        # fake Ollama on :11434
-MOCK_TOKEN_DELAY_MS=8 npm run mock:ai                  # slower streaming, to watch the progress steps
-MOCK_PORT=11500 npm run mock:ai                        # other port (then set PRIVATE_AI_URL)
-```
-
-The mock speaks the real Ollama wire protocol (`/api/tags`, streaming NDJSON `/api/chat`) and deliberately emits llama-style mistakes (un-escaped LaTeX, messy Mermaid), so it exercises the repair layer too.
+Plus: **folders** for each class, an **AI tutor** you can chat with about each project, **live lecture recording** (browser speech recognition), a **Review** page for all due flashcards, accounts with login, and light/dark themes.
 
 ---
 
-## Architecture
+## Run it (Windows)
+
+You need [Node.js](https://nodejs.org) 20.9 or newer and [Ollama](https://ollama.com).
+
+In PowerShell, inside the project folder:
+
+```powershell
+npm.cmd install
+copy .env.example .env.local
+ollama list
+```
+
+If `ollama list` shows a model other than `llama3.1` (for example `qwen3.5:4b`), open `.env.local` in Notepad and set `AI_MODEL_NAME` to that name. Or download llama3.1 with `ollama pull llama3.1`.
+
+Then build and start the app:
+
+```powershell
+npm.cmd run build
+npm.cmd start
+```
+
+Open **http://localhost:3000**, create an account, and start studying. Keep the PowerShell window open while you use the app.
+
+> PowerShell blocks `npm` by default ("running scripts is disabled"). Using `npm.cmd` avoids that. To fix it permanently: `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`.
+
+### No AI model yet?
+
+Run a pretend AI in a second window to try the app (it gives placeholder answers):
+
+```powershell
+npm.cmd run mock:ai
+```
+
+### Updating
+
+```powershell
+git pull
+npm.cmd install
+npm.cmd run build
+npm.cmd start
+```
+
+Your data (accounts, projects, flashcard progress) lives in the `data` folder and is kept across updates.
+
+---
+
+## How it works
 
 ```
-Browser (Dashboard.tsx)                       Next.js server                          Private AI
-──────────────────────                        ──────────────                          ──────────
-drop / paste → text extraction                POST /api/generate                      Ollama /api/chat
-(PDF, DOCX, SRT/VTT cleanup, HTML)  ───────▶  1. rate limit + validate                (llama3.1)
-                                              2. preflight GET /api/tags ──▶ 503 if down
-progress steps  ◀── NDJSON events ──────────  3. chunk > 15,000 words into ≤ 8,000-word
-                                                 chronological blocks
-                                              4. per block: system prompt (Academic Core
-                                                 + tier) + JSON-schema output ─────────▶  streams tokens
-                                                 rolling context of concepts covered
-                                              5. repair & validate JSON, retry once
-                                              6. synthesis pass + deterministic merge
-deepNotes / flashcards / quiz /   ◀────────── 7. result event
-mindMapCode → separate React states
+Browser                                Next.js server                               Your computer
+───────                                ──────────────                               ─────────────
+Create project  ── POST /api/projects ─▶  save project + materials (SQLite file)
+(topic and/or material,                   queue one job per chosen output
+ chosen outputs)                          background engine, one job at a time ──▶  Ollama /api/chat
+                                            • topic-only or from material
+Project pages  ◀── poll status ─────────   • long material → ≤ 8,000-word parts      (streams tokens)
+(live progress,                             • repairs messy JSON / LaTeX / Mermaid
+ retry, cancel)                             • out of memory → smaller context, then
+                                              split the material and try again
+Tutor chat     ── POST …/chat (stream) ─▶  retrieves the most relevant passages ──▶ Ollama
 ```
+
+- **Database:** SQLite compiled to WebAssembly (sql.js) with Drizzle ORM. No native modules, so `npm install` works the same on Windows, macOS and Linux. Saved to `data/study-suite.db`.
+- **Accounts:** email + password (scrypt hashing), database sessions in an httpOnly cookie. Every query is scoped to the signed-in user.
+- **Thinking models** (qwen3, deepseek-r1 and similar) are detected via `/api/show`; thinking is switched off and any `<think>` text is removed.
+- **Errors are explained in plain language**: AI offline (with automatic retries), model not installed, out of memory, unreadable answer, timeout.
 
 ### Key files
 
 | Path | Purpose |
 | --- | --- |
-| `src/app/api/generate/route.ts` | The pipeline endpoint: validation, rate limit, 503 preflight, JSON or NDJSON streaming |
-| `src/app/api/health/route.ts` | Status probe used by the header pill (never exposes the server URL) |
-| `src/lib/ai/prompts.ts` | Academic Core system prompt (verbatim), Deep Dive injection, JSON schema, synthesis prompt |
-| `src/lib/ai/pipeline.ts` | Chunk → generate with rolling context → synthesise → merge |
-| `src/lib/ai/ollama.ts` | Streaming Ollama client (structured outputs with JSON-mode fallback, long-job timeouts) |
-| `src/lib/ai/normalize.ts` | JSON extraction, LaTeX-escape repair, schema coercion |
-| `src/lib/text/chunking.ts` | Boundary-aware, balanced, lossless word chunker |
-| `src/lib/mindmap.ts` | Mermaid mindmap sanitiser / merger / notes-derived fallback |
-| `scripts/vendor-mermaid.mjs` | Copies Mermaid's prebuilt browser file to `public/vendor/` (runs on install, dev and build) so the bundler never has to process it |
-| `src/app/components/Dashboard.tsx` | Main UI: drop zone, tier toggle, processing steps, tabs |
-| `src/app/components/tabs/*` | Deep Notes, Flashcards, Quiz, Mind Map |
+| `src/lib/ai/engine.ts` | Background job queue; resumes unfinished work after a restart |
+| `src/lib/ai/generate.ts` | Per-output generation, chunking, retries, memory fallback |
+| `src/lib/ai/prompts.ts` | Academic Core prompt, Deep Dive protocol, one contract per output type |
+| `src/lib/ai/ollama.ts` | Streaming Ollama client |
+| `src/lib/ai/tutor.ts`, `retrieval.ts` | Tutor prompt and BM25 passage retrieval |
+| `src/lib/db/` | Schema and database (migrations in `drizzle/`) |
+| `src/lib/data/` | Data access layer (all user-scoped) |
+| `src/lib/srs.ts` | Spaced-repetition scheduling |
+| `src/app/(app)/` | Signed-in pages: dashboard, folders, projects, review, settings |
+| `scripts/mock-ollama.mjs` | Fake Ollama for development and tests |
 
-### API contract
+### API
 
-`POST /api/generate`
-
-```json
-{ "sourceText": "string", "contextTier": "standard" | "deep_dive" }
-```
-
-Success (`200`) returns the AI schema plus metadata:
-
-```json
-{
-  "deepNotes": "markdown with $LaTeX$",
-  "flashcards": [{ "question": "…", "answer": "…" }],
-  "quiz": [{ "question": "…", "options": ["…","…","…","…"], "correctAnswer": "A", "explanation": "…" }],
-  "mindMapCode": "mindmap\n  root((Topic))\n    …",
-  "meta": { "title": "…", "model": "llama3.1", "tier": "deep_dive", "wordCount": 21280, "segments": 3, "durationMs": 81234, "generatedAt": "…" }
-}
-```
-
-Send `Accept: application/x-ndjson` to receive progress events instead (`plan`, `segment_start`, `segment_progress`, `segment_done`, `synthesis_start`, then `result` or `error`), one JSON object per line.
-
-| Status | When |
+| Route | Purpose |
 | --- | --- |
-| `400` | Invalid JSON, empty `sourceText`, bad `contextTier`, fewer than 20 words |
-| `413` | Body > 8 MB or more than `MAX_SOURCE_WORDS` words |
-| `429` | Per-IP rate limit exceeded (`Retry-After` header set) |
-| `502` | AI server returned an error or unusable output after a retry |
-| `503` | AI server unreachable / busy / model not pulled: `{"error": "Our private AI server is warming up. Please give it a few moments!"}` |
-| `504` | A single model call exceeded `AI_REQUEST_TIMEOUT_MS` |
+| `POST /api/projects` | `{ topic?, title?, tier?, folderId?, materials?: [{kind, name, content}], outputs: [...] }` → `{ id }` |
+| `GET /api/projects/:id/status` | Status and live progress of every output |
+| `POST /api/projects/:id/generate` | `{ outputs: [...] }` create or regenerate |
+| `POST /api/projects/:id/materials` | `{ materials: [...] }` add material |
+| `POST /api/projects/:id/chat` | `{ message }` → NDJSON stream of `delta` / `done` / `error` events |
+| `GET /api/health` | AI server status (never exposes its address) |
 
-### How long lectures are handled
+All routes except `/api/health` require a signed-in session.
 
-* ≤ 15,000 words: a single pass.
-* \> 15,000 words: split into chronological blocks of **at most 8,000 words**, preferring paragraph → line → sentence boundaries (hard word splits only for unpunctuated captions). Block sizes are balanced so the last block is never a tiny fragment, and every word is sent exactly once.
-* Each block is processed in order with a rolling list of concepts already taught, so later blocks build on earlier ones instead of repeating them.
-* A small synthesis call links the blocks ("Master Synthesis" section and overall title); the per-block notes, cards, quizzes and mind maps are then merged deterministically, so no content is dropped even if synthesis fails.
-* Ollama's default context window is only a few thousand tokens and would silently truncate long prompts, so `num_ctx` is sized per request (prompt + output budget), never below `AI_NUM_CTX`.
-
-### Environment variables
-
-| Variable | Default | Notes |
-| --- | --- | --- |
-| `PRIVATE_AI_URL` | `http://localhost:11434` | Base URL of the Ollama server |
-| `AI_MODEL_NAME` | `llama3.1` | Must be pulled on the server |
-| `PRIVATE_AI_API_KEY` | – | Optional Bearer token for a proxy in front of Ollama |
-| `AI_NUM_CTX` | `32768` | Minimum context window requested |
-| `AI_NUM_PREDICT` | `8192` | Max generated tokens per call |
-| `AI_TEMPERATURE` | `0.3` | |
-| `AI_KEEP_ALIVE` | `30m` | How long Ollama keeps the model loaded |
-| `AI_REQUEST_TIMEOUT_MS` | `900000` | Per-call ceiling (CPU-only servers are slow) |
-| `MAX_SOURCE_WORDS` | `120000` | Largest accepted input |
-| `RATE_LIMIT_MAX` / `RATE_LIMIT_WINDOW_MS` | `20` / `3600000` | Per-IP limit; `0` disables. In-memory, per process |
-
-None of these use the `NEXT_PUBLIC_` prefix, so they never reach the browser.
-
----
-
-## Scripts
+## Development
 
 ```bash
-npm run dev        # development server
-npm run build      # production build
-npm start          # serve the production build
-npm test           # unit tests (chunking, JSON/LaTeX repair, quiz coercion, mind maps)
-npm run lint
+npm run dev          # http://localhost:3000
+npm test             # unit tests (vitest)
 npm run typecheck
-npm run mock:ai    # mock Ollama server
+npm run lint
+npm run mock:ai      # fake Ollama; MOCK_THINKING=1, MOCK_MAX_CTX=6000, MOCK_FAIL=quiz simulate problems
+npx drizzle-kit generate   # after changing src/lib/db/schema.ts
 ```
 
-## Deployment notes
-
-* Self-host next to (or on the same private network as) the AI server: `npm run build && npm start`, behind a reverse proxy. Disable response buffering for `/api/generate` (the route already sends `X-Accel-Buffering: no` and heartbeats every 15 s).
-* Serverless hosts cap request duration (`maxDuration` is set to 300 s) and usually can't reach a private GPU box, so they are a poor fit for long lectures.
-* The rate limiter is in-memory; with several replicas, rate-limit at the proxy instead.
-* Mermaid is served from `public/vendor/mermaid.min.js` instead of being bundled. Bundling it needed over 2 GB of memory and crashed builds on smaller machines; the file is regenerated automatically and is git-ignored.
-* Generated suites are cached only in the student's own browser (`localStorage`) so a refresh doesn't lose work.
+Settings are documented in `.env.example`.

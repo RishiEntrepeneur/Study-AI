@@ -8,10 +8,9 @@
  *  3. coerces loosely-shaped fields into the strict schema.
  */
 
-import type { Flashcard, OptionLetter, QuizQuestion, StudySuite } from "../types";
+import type { Flashcard, KeyTerm, OptionLetter, QuizQuestion } from "../types";
 import { OPTION_LETTERS } from "../types";
 import { normalizeMath } from "../math";
-import { sanitizeMindmap } from "../mindmap";
 
 export class ModelOutputError extends Error {
   constructor(message: string) {
@@ -24,8 +23,16 @@ export class ModelOutputError extends Error {
 /* JSON extraction & repair                                                   */
 /* -------------------------------------------------------------------------- */
 
+/** Remove reasoning blocks that "thinking" models (qwen3, deepseek-r1…) may emit before the answer. */
+export function stripThinking(raw: string): string {
+  return raw
+    .replace(/<think>[\s\S]*?<\/think>/gi, "")
+    .replace(/^[\s\S]*?<\/think>/i, "") // an unclosed opening tag was cut off upstream
+    .trim();
+}
+
 export function extractJsonObject(raw: string): string {
-  let text = raw.replace(/^\uFEFF/, "").trim();
+  let text = stripThinking(raw.replace(/^\uFEFF/, "")).trim();
   // Only unwrap a fence when the answer itself is fenced; fences *inside* JSON
   // strings (e.g. a ```mermaid block in mindMapCode) must be left alone.
   if (!text.startsWith("{")) {
@@ -263,26 +270,36 @@ export function normalizeQuiz(value: unknown): QuizQuestion[] {
   return questions.slice(0, 50);
 }
 
-export function normalizeDeepNotes(value: unknown): string {
-  return normalizeMath(asText(value));
+export function normalizeTerms(value: unknown): KeyTerm[] {
+  const list = Array.isArray(value) ? value : isObject(value) ? Object.values(value) : [];
+  const seen = new Set<string>();
+  const terms: KeyTerm[] = [];
+  for (const item of list) {
+    let term = "";
+    let definition = "";
+    if (isObject(item)) {
+      term = asText(pick(item, ["term", "name", "word", "concept", "title"]));
+      definition = asText(pick(item, ["definition", "meaning", "description", "explanation"]));
+    } else if (typeof item === "string") {
+      const m = item.match(/^\s*\**([^:*]+?)\**\s*[:\-–—]\s*([\s\S]+)$/);
+      if (m) [term, definition] = [m[1].trim(), m[2].trim()];
+    }
+    if (!term || !definition) continue;
+    const key = normKey(term);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    terms.push({ term: normalizeMath(term), definition: normalizeMath(definition) });
+  }
+  return terms.sort((a, b) => a.term.localeCompare(b.term, undefined, { sensitivity: "base" })).slice(0, 120);
 }
 
 /**
- * Coerce a parsed model object into a StudySuite. Throws ModelOutputError when
- * the output is too thin to be useful (so the caller can retry).
+ * Clean a free-text Markdown answer: drop reasoning blocks, unwrap an answer
+ * that was wrapped in one big code fence, normalise LaTeX.
  */
-export function normalizeStudySuite(parsed: unknown, fallbackTitle = "Lecture"): StudySuite {
-  if (!isObject(parsed)) throw new ModelOutputError("The model output was not a JSON object.");
-
-  const deepNotes = normalizeDeepNotes(pick(parsed, ["deepNotes", "deep_notes", "notes"]));
-  const flashcards = normalizeFlashcards(pick(parsed, ["flashcards", "flash_cards", "cards"]));
-  const quiz = normalizeQuiz(pick(parsed, ["quiz", "questions", "interactiveQuiz"]));
-  const rawMindMap = asText(pick(parsed, ["mindMapCode", "mind_map_code", "mindMap", "mindmap"]));
-  const mindMapCode = sanitizeMindmap(rawMindMap, fallbackTitle, deepNotes) ?? "";
-
-  if (deepNotes.length < 40 && flashcards.length === 0 && quiz.length === 0) {
-    throw new ModelOutputError("The model output did not contain usable study material.");
-  }
-
-  return { deepNotes, flashcards, quiz, mindMapCode };
+export function cleanMarkdownOutput(raw: string): string {
+  let text = stripThinking(raw).replace(/^\uFEFF/, "").trim();
+  const fenced = text.match(/^```(?:markdown|md)?[ \t]*\n([\s\S]*?)\n```\s*$/i);
+  if (fenced) text = fenced[1].trim();
+  return normalizeMath(text);
 }

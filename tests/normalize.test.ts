@@ -1,11 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
-  normalizeQuiz,
+  cleanMarkdownOutput,
   normalizeFlashcards,
-  normalizeStudySuite,
+  normalizeQuiz,
+  normalizeTerms,
   parseModelJson,
   repairDecodedControlChars,
   repairLatexEscapes,
+  stripThinking,
 } from "@/lib/ai/normalize";
 
 describe("LaTeX escape repair", () => {
@@ -69,20 +71,25 @@ describe("flashcards coercion", () => {
   });
 });
 
-describe("normalizeStudySuite", () => {
-  it("produces a clean suite and a valid mind map", () => {
-    const suite = normalizeStudySuite({
-      deepNotes: "# Thermo\n- **Entropy**: measure\n  - *Mechanics*: $S = k \\ln W$",
-      flashcards: [{ question: "q", answer: "a" }],
-      quiz: [],
-      mindMapCode: "```mermaid\nmindmap\n  root((Thermodynamics))\n    Laws (1st & 2nd)\n      Energy [conserved]\n    Entropy\n```",
-    });
-    expect(suite.mindMapCode.split("\n")[0]).toBe("mindmap");
-    expect(suite.mindMapCode).toContain("root((Thermodynamics))");
-    expect(suite.mindMapCode).not.toMatch(/Laws \(|\[conserved\]/);
+describe("free-text and thinking-model output", () => {
+  it("removes <think> blocks before the answer", () => {
+    expect(stripThinking("<think>let me plan {json}</think>\n{\"a\": 1}")).toBe('{"a": 1}');
+    expect(parseModelJson('<think>reasoning with { braces }</think>{"x": 2}')).toEqual({ x: 2 });
   });
 
-  it("rejects empty output so the pipeline can retry", () => {
-    expect(() => normalizeStudySuite({ deepNotes: "", flashcards: [], quiz: [], mindMapCode: "" })).toThrow();
+  it("unwraps a fenced Markdown answer and normalises math", () => {
+    expect(cleanMarkdownOutput("```markdown\n# Title\n\\(x^2\\)\n```")).toBe("# Title\n$x^2$");
+  });
+});
+
+describe("key terms", () => {
+  it("normalises, dedupes and sorts terms", () => {
+    const terms = normalizeTerms([
+      { term: "Entropy", definition: "Disorder" },
+      { name: "enthalpy", meaning: "Heat content" },
+      "**Gibbs energy**: Free energy",
+      { term: "entropy", definition: "dup" },
+    ]);
+    expect(terms.map((t) => t.term)).toEqual(["enthalpy", "Entropy", "Gibbs energy"]);
   });
 });

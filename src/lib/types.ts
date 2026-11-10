@@ -1,13 +1,11 @@
 /**
- * Shared contracts between the private AI pipeline (server) and the dashboard (client).
+ * Shared contracts between the server and the browser.
  */
 
 export type ContextTier = "standard" | "deep_dive";
-
 export const CONTEXT_TIERS: readonly ContextTier[] = ["standard", "deep_dive"] as const;
 
 export type OptionLetter = "A" | "B" | "C" | "D";
-
 export const OPTION_LETTERS: readonly OptionLetter[] = ["A", "B", "C", "D"] as const;
 
 export interface Flashcard {
@@ -23,32 +21,40 @@ export interface QuizQuestion {
   explanation: string;
 }
 
-/** The exact JSON object the private AI is instructed to return. */
-export interface StudySuite {
-  deepNotes: string;
-  flashcards: Flashcard[];
-  quiz: QuizQuestion[];
-  mindMapCode: string;
+export interface KeyTerm {
+  term: string;
+  definition: string;
 }
 
-export interface SuiteMeta {
-  title: string;
-  model: string;
-  tier: ContextTier;
-  wordCount: number;
-  segments: number;
-  durationMs: number;
-  generatedAt: string;
+export type OutputType = "notes" | "cheatsheet" | "flashcards" | "quiz" | "mindmap" | "terms";
+
+export type OutputContent =
+  | { type: "notes"; markdown: string }
+  | { type: "cheatsheet"; markdown: string }
+  | { type: "flashcards"; cards: Flashcard[] }
+  | { type: "quiz"; questions: QuizQuestion[] }
+  | { type: "mindmap"; code: string }
+  | { type: "terms"; terms: KeyTerm[] };
+
+export type ContentOf<T extends OutputType> = Extract<OutputContent, { type: T }>;
+
+export type GenerationStatus = "queued" | "running" | "done" | "error" | "cancelled";
+
+export interface GenerationProgress {
+  tokens: number;
+  part: number;
+  parts: number;
+  note?: string;
 }
 
-/** What POST /api/generate returns on success. */
-export interface StudySuiteResponse extends StudySuite {
-  meta: SuiteMeta;
-}
-
-export interface GenerateRequestBody {
-  sourceText: string;
-  contextTier: ContextTier;
+/** What GET /api/projects/[id]/status returns per output. */
+export interface GenerationStatusView {
+  id: string;
+  type: OutputType;
+  status: GenerationStatus;
+  error: string | null;
+  hasContent: boolean;
+  progress: GenerationProgress | null;
 }
 
 export interface ApiErrorBody {
@@ -56,16 +62,3 @@ export interface ApiErrorBody {
   code?: string;
   detail?: string;
 }
-
-/**
- * Progress events streamed as NDJSON when the client sends
- * `Accept: application/x-ndjson`. One JSON object per line.
- */
-export type PipelineEvent =
-  | { type: "plan"; wordCount: number; segments: number; chunked: boolean }
-  | { type: "segment_start"; index: number; total: number; words: number }
-  | { type: "segment_progress"; index: number; total: number; tokens: number }
-  | { type: "segment_done"; index: number; total: number }
-  | { type: "synthesis_start" }
-  | { type: "result"; data: StudySuiteResponse }
-  | { type: "error"; status: number; error: string; code?: string; detail?: string };
