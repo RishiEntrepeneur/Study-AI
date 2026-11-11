@@ -4,11 +4,10 @@
  */
 import { eq } from "drizzle-orm";
 import { requireApiUser } from "@/lib/auth/dal";
-import { getAIConfig } from "@/lib/ai/config";
+import { activeContextSize, getAIConfig, shrinkContextSize } from "@/lib/ai/config";
 import { describeAIError } from "@/lib/ai/errors";
-import { contextFor } from "@/lib/ai/generate";
 import { handleInputError, handleRouteError, jsonError, NO_STORE, readJson } from "@/lib/ai/http";
-import { chat } from "@/lib/ai/ollama";
+import { AIMemoryError, chat } from "@/lib/ai/ollama";
 import { buildTutorMessages } from "@/lib/ai/tutor";
 import { schema, write } from "@/lib/db";
 import { getProjectBundle, parseContent } from "@/lib/data/projects";
@@ -16,7 +15,8 @@ import { addChatMessage, listChat } from "@/lib/data/study";
 import { checkRateLimit } from "@/lib/rateLimit";
 
 const MAX_MESSAGE_CHARS = 4_000;
-const REPLY_TOKENS = 1_536;
+/** Tutor answers are meant to be short; this only caps a runaway one. */
+const REPLY_TOKENS = 1_024;
 
 export async function POST(request: Request, ctx: RouteContext<"/api/projects/[projectId]/chat">): Promise<Response> {
   let user;
@@ -41,6 +41,8 @@ export async function POST(request: Request, ctx: RouteContext<"/api/projects/[p
   }
 
   const cfg = getAIConfig();
+  // Same context size as every other request, so the model is never reloaded for a chat.
+  const numCtx = activeContextSize(cfg);
   const history = (await listChat(user.id, projectId)).map((m) => ({ role: m.role, content: m.content }));
   const notes = parseContent(bundle.generations.find((g) => g.type === "notes"), "notes")?.markdown;
   const messages = buildTutorMessages({
@@ -50,7 +52,7 @@ export async function POST(request: Request, ctx: RouteContext<"/api/projects/[p
     notes,
     history,
     question: message,
-  });
+  }, numCtx - REPLY_TOKENS - 96);
   const userMessage = await addChatMessage(projectId, "user", message);
 
   const abort = new AbortController();
@@ -75,8 +77,8 @@ export async function POST(request: Request, ctx: RouteContext<"/api/projects/[p
         await chat({
           cfg,
           messages,
-          numCtx: contextFor("", "x".repeat(promptChars), REPLY_TOKENS, cfg.maxContext),
-          numPredict: REPLY_TOKENS,
+          numCtx,
+          numPredict: Math.min(REPLY_TOKENS, Math.max(256, numCtx - Math.ceil(promptChars / 3.2) - 64)),
           temperature: 0.5,
           signal: abort.signal,
           onText: (text) => {
@@ -96,6 +98,8 @@ export async function POST(request: Request, ctx: RouteContext<"/api/projects/[p
         } else {
           // Roll back the question so a retry doesn't duplicate it.
           await write((db) => db.delete(schema.chatMessages).where(eq(schema.chatMessages.id, userMessage.id)).run());
+          // Out of memory: every later request (including a retry of this one) uses a smaller context.
+          if (err instanceof AIMemoryError) shrinkContextSize(cfg);
           send({ type: "error", error: describeAIError(err, cfg.model).message });
         }
       } finally {

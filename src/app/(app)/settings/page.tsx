@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { requireUser } from "@/lib/auth/dal";
+import { activeContextSize, getAIConfig } from "@/lib/ai/config";
 import ThemeToggle from "../../components/ThemeToggle";
 import { AIStatus, DeleteAccountForm, PasswordForm, ProfileForm } from "../../components/SettingsForms";
 
@@ -14,6 +15,39 @@ function Section({ title, description, children }: { title: string; description?
       </div>
       <div className="min-w-0">{children}</div>
     </section>
+  );
+}
+
+const MODE_TEXT = {
+  light: "Light mode, made for laptops with about 8 GB of memory",
+  balanced: "Balanced mode",
+  roomy: "Roomy mode, for computers with plenty of memory",
+  custom: "Custom setting from .env.local",
+} as const;
+
+function AISpeed() {
+  const cfg = getAIConfig();
+  const context = activeContextSize(cfg);
+  return (
+    <div className="space-y-3 text-sm">
+      <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5">
+        <dt className="text-muted">Memory setting</dt>
+        <dd>
+          {MODE_TEXT[cfg.memory.mode]}
+          {cfg.memory.localAI && cfg.memory.mode !== "custom" && <span className="text-muted"> (this computer has {cfg.memory.totalGb} GB)</span>}
+        </dd>
+        <dt className="text-muted">AI working memory</dt>
+        <dd>
+          {context.toLocaleString()} tokens{context < cfg.contextSize && <span className="text-muted"> (lowered after running out of memory)</span>}
+        </dd>
+        <dt className="text-muted">Unloads the model after</dt>
+        <dd>{cfg.keepAlive} without use</dd>
+      </dl>
+      <p className="text-muted">
+        Still slow? Pick fewer things to make at once (notes and flashcards are a good start), keep the Standard depth, and close other big programs
+        while the AI writes. A smaller model, such as <span className="font-mono">qwen3.5:2b</span>, is faster still (see the README).
+      </p>
+    </div>
   );
 }
 
@@ -34,6 +68,9 @@ export default async function SettingsPage() {
       </Section>
       <Section title="AI server" description="Your private AI. Nothing you study is sent anywhere else.">
         <AIStatus />
+      </Section>
+      <Section title="AI speed" description="Picked automatically to suit this computer.">
+        <AISpeed />
       </Section>
       <Section title="Delete account">
         <DeleteAccountForm />

@@ -40,11 +40,28 @@ export type ContentOf<T extends OutputType> = Extract<OutputContent, { type: T }
 
 export type GenerationStatus = "queued" | "running" | "done" | "error" | "cancelled";
 
+/** Live progress of one output while it's being made (server side). */
 export interface GenerationProgress {
   tokens: number;
   part: number;
   parts: number;
   note?: string;
+  /** Everything written so far in the current part. */
+  text?: string;
+}
+
+/** What the browser sees of that progress. */
+export interface GenerationProgressView {
+  tokens: number;
+  part: number;
+  parts: number;
+  note?: string;
+  /** Words written so far in this part. */
+  words?: number;
+  /** Cards, questions or terms finished so far in this part. */
+  items?: number;
+  /** The end of the text so far, for notes and cheat sheets (read while it writes). */
+  preview?: string;
 }
 
 /** What GET /api/projects/[id]/status returns per output. */
@@ -54,7 +71,7 @@ export interface GenerationStatusView {
   status: GenerationStatus;
   error: string | null;
   hasContent: boolean;
-  progress: GenerationProgress | null;
+  progress: GenerationProgressView | null;
 }
 
 export interface ApiErrorBody {

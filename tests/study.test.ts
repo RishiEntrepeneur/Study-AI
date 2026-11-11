@@ -3,7 +3,7 @@ import { cardStage, formatInterval, schedule } from "@/lib/srs";
 import { rankPassages, splitPassages } from "@/lib/ai/retrieval";
 import { hashPassword, verifyPassword } from "@/lib/auth/password";
 import { parseNewProject } from "@/lib/validation";
-import { buildSystemPrompt, buildUserPrompt, ACADEMIC_CORE_PROMPT } from "@/lib/ai/prompts";
+import { buildSharedSystem, buildTaskPrompt, ACADEMIC_CORE_PROMPT } from "@/lib/ai/prompts";
 
 const fresh = { intervalDays: 0, ease: 2.5, reps: 0, lapses: 0 };
 const DAY = 86_400_000;
@@ -80,12 +80,12 @@ describe("new project validation", () => {
 
 describe("prompts", () => {
   it("keeps the Academic Core verbatim and switches modes", () => {
-    const topic = buildSystemPrompt({ type: "flashcards", tier: "deep_dive", mode: "topic", multiPart: false });
+    const topic = buildSharedSystem("deep_dive", { kind: "topic", topic: "Entropy", title: "Entropy", text: null });
     expect(topic.startsWith(ACADEMIC_CORE_PROMPT)).toBe(true);
     expect(topic).toContain("DEEP DIVE");
     expect(topic).toContain("there is no lecture material");
-    expect(topic).toContain("18 to 25");
-    expect(buildUserPrompt({ topic: "Entropy", title: "Entropy", text: null })).toContain("TOPIC: Entropy");
-    expect(buildUserPrompt({ topic: "", title: "T", text: "material" })).toContain("<<<LECTURE_MATERIAL_START>>>");
+    expect(topic).toContain("TOPIC: Entropy");
+    expect(buildTaskPrompt("flashcards", "deep_dive")).toContain("18 to 20");
+    expect(buildSharedSystem("standard", { kind: "material", topic: "", title: "T", text: "material" })).toContain("<<<LECTURE_MATERIAL_START>>>");
   });
 });

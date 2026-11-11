@@ -9,7 +9,8 @@ const nextConfig: NextConfig = {
   // type checking runs separately (`npm run typecheck`), and server source
   // maps are skipped. Together this cuts the build's peak memory by ~15%.
   typescript: { ignoreBuildErrors: true },
-  experimental: { serverSourceMaps: false },
+  experimental: { serverSourceMaps: false, cpus: 1 },
+  enablePrerenderSourceMaps: false,
   turbopack: {
     rules: {
       "*.css": {

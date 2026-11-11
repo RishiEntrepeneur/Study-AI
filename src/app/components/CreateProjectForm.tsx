@@ -18,6 +18,8 @@ interface Props {
   defaultFolderId?: string | null;
   /** Smaller layout for the dashboard. */
   compact?: boolean;
+  /** How many words of material the AI reads at once (depends on the computer's memory). */
+  blockWords?: { trigger: number; size: number };
 }
 
 type MaterialTab = "paste" | "upload" | "record";
@@ -28,7 +30,7 @@ const TABS: Array<{ id: MaterialTab; label: string; icon: typeof Upload }> = [
   { id: "record", label: "Record lecture", icon: Mic },
 ];
 
-export default function CreateProjectForm({ folders, defaultFolderId = null, compact = false }: Props) {
+export default function CreateProjectForm({ folders, defaultFolderId = null, compact = false, blockWords }: Props) {
   const router = useRouter();
   const [topic, setTopic] = useState("");
   const [title, setTitle] = useState("");
@@ -47,7 +49,7 @@ export default function CreateProjectForm({ folders, defaultFolderId = null, com
     () => countWords(pasted) + countWords(transcript) + files.reduce((s, f) => s + f.words, 0),
     [pasted, transcript, files],
   );
-  const segments = estimateSegments(materialWords);
+  const segments = estimateSegments(materialWords, blockWords);
   const hasInput = topic.trim().length > 0 || materialWords >= 20;
   const canSubmit = hasInput && outputs.length > 0 && !submitting;
 
@@ -151,7 +153,8 @@ export default function CreateProjectForm({ folders, defaultFolderId = null, com
             {tab === "record" && <RecordLecture transcript={transcript} onTranscriptChange={setTranscript} />}
             {segments > 1 && (
               <p className="mt-3 text-xs text-muted">
-                Long material: it will be studied in {segments} parts of up to 8,000 words each, then combined.
+                Long material: the AI will read it in {segments} parts of about {(blockWords?.size ?? 8000).toLocaleString()} words, then
+                combine them. Notes come first; everything else is made from the notes, which is much quicker.
               </p>
             )}
           </div>

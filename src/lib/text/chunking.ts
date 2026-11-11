@@ -44,10 +44,15 @@ export function needsChunking(wordCount: number): boolean {
   return wordCount > CHUNK_TRIGGER_WORDS;
 }
 
-/** Number of blocks a text of `wordCount` words will be split into. */
-export function estimateSegments(wordCount: number): number {
-  if (!needsChunking(wordCount)) return 1;
-  return Math.ceil(wordCount / CHUNK_SIZE_WORDS);
+/**
+ * Number of blocks a text of `wordCount` words will be split into. The server
+ * sizes blocks to the AI's memory setting; pass that size as `blockWords`.
+ */
+export function estimateSegments(wordCount: number, blockWords?: { trigger: number; size: number }): number {
+  const trigger = blockWords?.trigger ?? CHUNK_TRIGGER_WORDS;
+  const size = blockWords?.size ?? CHUNK_SIZE_WORDS;
+  if (wordCount <= trigger) return 1;
+  return Math.ceil(wordCount / size);
 }
 
 interface Unit {

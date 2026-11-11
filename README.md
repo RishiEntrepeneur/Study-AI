@@ -59,6 +59,33 @@ npm.cmd run build
 npm.cmd start
 ```
 
+### If it's slow, or your laptop struggles
+
+The app tunes itself to your computer: on an 8 GB laptop it uses a small, fixed amount of AI memory and lets Ollama free it 5 minutes after you
+stop. **Settings → AI speed** shows what it picked. To go faster still:
+
+- **Make fewer things at once.** Notes and flashcards first; add the rest later from the project page. Keep the depth on *Standard*.
+- **Read while it writes.** Notes appear as they're written, so you can start before they're finished.
+- **Close big programs** (games, video, lots of browser tabs) while the AI writes. The AI needs that memory.
+- **Use a smaller model.** About twice as fast, a little less detailed:
+
+  ```powershell
+  ollama pull qwen3.5:2b
+  ```
+
+  Then set `AI_MODEL_NAME=qwen3.5:2b` in `.env.local`, and run `npm.cmd run build` and `npm.cmd start` again.
+- **Halve Ollama's working memory** (optional). Run these once in PowerShell, then quit Ollama (right-click its icon by the clock → Quit) and open it again:
+
+  ```powershell
+  setx OLLAMA_FLASH_ATTENTION 1
+  ```
+
+  ```powershell
+  setx OLLAMA_KV_CACHE_TYPE q8_0
+  ```
+
+If the AI runs out of memory, the app lowers its memory setting by itself and tries again.
+
 Your data (accounts, projects, flashcard progress) lives in the `data` folder and is kept across updates.
 
 ---
@@ -70,9 +97,11 @@ Browser                                Next.js server                           
 ───────                                ──────────────                               ─────────────
 Create project  ── POST /api/projects ─▶  save project + materials (SQLite file)
 (topic and/or material,                   queue one job per chosen output
- chosen outputs)                          background engine, one job at a time ──▶  Ollama /api/chat
-                                            • topic-only or from material
-Project pages  ◀── poll status ─────────   • long material → ≤ 8,000-word parts      (streams tokens)
+ chosen outputs)                          background engine: a project's outputs ──▶  Ollama /api/chat
+                                            are made together, notes first          (one fixed context
+                                            • topic-only or from material            size: no reloads)
+Project pages  ◀── poll status ─────────   • long material → parts sized to memory;   (streams tokens)
+                                              the rest is made from the notes
 (live progress,                             • repairs messy JSON / LaTeX / Mermaid
  retry, cancel)                             • out of memory → smaller context, then
                                               split the material and try again
@@ -89,8 +118,9 @@ Tutor chat     ── POST …/chat (stream) ─▶  retrieves the most relevant
 | Path | Purpose |
 | --- | --- |
 | `src/lib/ai/engine.ts` | Background job queue; resumes unfinished work after a restart |
-| `src/lib/ai/generate.ts` | Per-output generation, chunking, retries, memory fallback |
-| `src/lib/ai/prompts.ts` | Academic Core prompt, Deep Dive protocol, one contract per output type |
+| `src/lib/ai/generate.ts` | Makes a project's outputs together (material read once and cached), block sizing, retries, memory fallback |
+| `src/lib/ai/config.ts` | Settings, and the automatic memory profile for this computer |
+| `src/lib/ai/prompts.ts` | Academic Core prompt, Deep Dive protocol, one contract per output type (the shared part comes first so it can be cached) |
 | `src/lib/ai/ollama.ts` | Streaming Ollama client |
 | `src/lib/ai/tutor.ts`, `retrieval.ts` | Tutor prompt and BM25 passage retrieval |
 | `src/lib/db/` | Schema and database (migrations in `drizzle/`) |

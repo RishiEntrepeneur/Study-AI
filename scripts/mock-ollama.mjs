@@ -14,6 +14,12 @@
  *   MOCK_THINKING=1 npm run mock:ai          # behave like a "thinking" model (qwen3 etc.)
  *   MOCK_MAX_CTX=6000 npm run mock:ai        # refuse larger context windows with an out-of-memory error
  *   MOCK_FAIL=quiz npm run mock:ai           # always return garbage for one output type
+ *
+ * It also imitates how Ollama spends time and memory, and reports it at
+ * GET /mock/stats (POST /mock/reset clears it):
+ *   - a request with a different num_ctx than the loaded model forces a reload;
+ *   - the start of a prompt that matches the previous prompt is served from the
+ *     cache, so only the rest has to be read again.
  */
 import http from "node:http";
 
@@ -102,15 +108,50 @@ function tutorReply(question, context) {
   return `Great question. In short: **${c[0]}** is about how a rate depends on the current state, written $\\frac{dx}{dt} = kx$.\n\n- Think of it like interest on savings: the more you have, the faster it grows.\n- Your notes connect it to **${c[1]}** and **${c[2]}**.\n\nYou asked: _${question.slice(0, 80)}_. Can you tell me what happens when $k < 0$?`;
 }
 
-function kindOf(system) {
-  if (system.includes("study tutor")) return "tutor";
-  if (system.includes("Markdown study notes")) return "notes";
-  if (system.includes("one-page cheat sheet")) return "cheatsheet";
-  if (system.includes('{"flashcards"')) return "flashcards";
-  if (system.includes('{"questions"')) return "quiz";
-  if (system.includes('{"terms"')) return "terms";
-  if (system.includes("Mermaid mindmap code")) return "mindmap";
+function kindOf(prompt) {
+  if (prompt.includes("study tutor")) return "tutor";
+  if (prompt.includes("Markdown study notes")) return "notes";
+  if (prompt.includes("one-page cheat sheet")) return "cheatsheet";
+  if (prompt.includes('{"flashcards"')) return "flashcards";
+  if (prompt.includes('{"questions"')) return "quiz";
+  if (prompt.includes('{"terms"')) return "terms";
+  if (prompt.includes("Mermaid mindmap code")) return "mindmap";
   return "unknown";
+}
+
+/* ---- Imitation of Ollama's model loading and prompt cache, for measuring ---- */
+const sim = { loadedCtx: null, loads: 0, reloads: 0, lastPrompt: "", requests: [] };
+function simulate(body, kind, prompt) {
+  const ctx = body.options?.num_ctx ?? 0;
+  let reload = false;
+  if (sim.loadedCtx !== ctx) {
+    reload = sim.loadedCtx !== null;
+    if (reload) sim.reloads++;
+    sim.loads++;
+    sim.loadedCtx = ctx;
+    sim.lastPrompt = ""; // a reload throws the cache away
+  }
+  let cached = 0;
+  const prev = sim.lastPrompt;
+  const max = Math.min(prev.length, prompt.length);
+  while (cached < max && prev.charCodeAt(cached) === prompt.charCodeAt(cached)) cached++;
+  sim.lastPrompt = prompt;
+  sim.requests.push({ kind, ctx, promptChars: prompt.length, cachedChars: cached, numPredict: body.options?.num_predict ?? null, reload });
+}
+function simStats() {
+  const r = sim.requests;
+  const sum = (f) => r.reduce((s, x) => s + f(x), 0);
+  return {
+    requests: r.length,
+    loads: sim.loads,
+    reloads: sim.reloads,
+    contextSizes: [...new Set(r.map((x) => x.ctx))],
+    maxContext: Math.max(0, ...r.map((x) => x.ctx)),
+    promptChars: sum((x) => x.promptChars),
+    promptCharsReadAgain: sum((x) => x.promptChars - x.cachedChars),
+    numPredictTotal: sum((x) => x.numPredict ?? 0),
+    detail: r,
+  };
 }
 
 const readBody = (req) =>
@@ -133,6 +174,11 @@ const server = http.createServer(async (req, res) => {
   if (req.method === "POST" && url.pathname === "/api/show") {
     return json(res, 200, { capabilities: THINKING ? ["completion", "tools", "thinking"] : ["completion", "tools"] });
   }
+  if (req.method === "GET" && url.pathname === "/mock/stats") return json(res, 200, simStats());
+  if (req.method === "POST" && url.pathname === "/mock/reset") {
+    Object.assign(sim, { loadedCtx: null, loads: 0, reloads: 0, lastPrompt: "", requests: [] });
+    return json(res, 200, { ok: true });
+  }
   if (req.method !== "POST" || url.pathname !== "/api/chat") return json(res, 404, { error: "not found" });
 
   const body = JSON.parse(await readBody(req));
@@ -148,9 +194,11 @@ const server = http.createServer(async (req, res) => {
   const system = body.messages?.find((m) => m.role === "system")?.content ?? "";
   const users = (body.messages ?? []).filter((m) => m.role === "user");
   const user = users.at(-1)?.content ?? "";
-  const kind = kindOf(system);
-  const topic = user.match(/TOPIC: (.+)/)?.[1] ?? user.match(/STUDENT'S FOCUS: (.+)/)?.[1];
-  const material = user.split("<<<LECTURE_MATERIAL_START>>>")[1]?.split("<<<LECTURE_MATERIAL_END>>>")[0] ?? "";
+  const prompt = (body.messages ?? []).map((m) => `<${m.role}>\n${m.content}`).join("\n");
+  const kind = kindOf(system.includes("study tutor") ? system : prompt);
+  simulate(body, kind, prompt);
+  const topic = prompt.match(/TOPIC: (.+)/)?.[1] ?? prompt.match(/STUDENT'S FOCUS: (.+)/)?.[1];
+  const material = prompt.split("<<<LECTURE_MATERIAL_START>>>")[1]?.split("<<<LECTURE_MATERIAL_END>>>")[0] ?? "";
   const c = concepts(`${topic ?? ""} ${material}`);
   const subject = (topic ?? c.slice(0, 2).join(" and ")).slice(0, 60);
 

@@ -2,6 +2,8 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { ArrowRight, FolderPlus } from "lucide-react";
 import { requireUser } from "@/lib/auth/dal";
+import { getAIConfig } from "@/lib/ai/config";
+import { typicalBlockWords } from "@/lib/ai/generate";
 import { listFolders, listProjects } from "@/lib/data/projects";
 import { studyStats } from "@/lib/data/study";
 import { folderHex } from "@/lib/folderColors";
@@ -57,7 +59,7 @@ export default async function DashboardPage() {
           <h2 id="new-heading" className="mb-5 text-lg font-semibold">
             Start a new project
           </h2>
-          <CreateProjectForm folders={folders.map((f) => ({ id: f.id, name: f.name }))} compact />
+          <CreateProjectForm folders={folders.map((f) => ({ id: f.id, name: f.name }))} compact blockWords={typicalBlockWords(getAIConfig())} />
         </section>
 
         <section aria-labelledby="recent-heading">

@@ -9,13 +9,23 @@ import { useGenerations } from "./GenerationProvider";
 import OutputIcon from "./OutputIcon";
 import Spinner from "./Spinner";
 
+const ITEM_WORDS: Partial<Record<OutputType, [string, string]>> = {
+  flashcards: ["card", "cards"],
+  quiz: ["question", "questions"],
+  terms: ["term", "terms"],
+};
+
 function progressText(s: GenerationStatusView): string {
   if (s.status === "queued") return "Waiting in line…";
   const p = s.progress;
   if (!p) return "Starting…";
   if (p.note) return p.note;
   const part = p.parts > 1 ? `Part ${p.part} of ${p.parts} · ` : "";
-  return p.tokens > 0 ? `${part}writing (${p.tokens.toLocaleString()} tokens so far)` : `${part}reading your material…`;
+  if (p.tokens === 0) return `${part}reading…`;
+  const item = ITEM_WORDS[s.type];
+  if (item && p.items !== undefined) return `${part}${p.items} ${p.items === 1 ? item[0] : item[1]} written so far`;
+  if (p.words !== undefined) return `${part}${p.words.toLocaleString()} words written so far`;
+  return `${part}writing…`;
 }
 
 export function GenerateButton({
@@ -85,6 +95,16 @@ function ProgressCard({ status, compact }: { status: GenerationStatusView; compa
           {status.hasContent ? `Making a new version of your ${info.label.toLowerCase()}` : `Creating your ${info.label.toLowerCase()}`}
         </p>
         <p className="mt-0.5 text-sm text-muted">{progressText(status)}</p>
+        {!compact && status.progress?.preview && (
+          <div className="mt-3 rounded-lg border border-line bg-subtle px-3 py-2">
+            <p className="mb-1 text-xs font-medium text-muted">Writing now (you can start reading):</p>
+            {/* Newest text at the bottom; older lines fade out at the top. */}
+            <div className="relative flex max-h-56 flex-col justify-end overflow-hidden">
+              <p className="text-sm leading-relaxed whitespace-pre-wrap">{status.progress.preview}</p>
+              <span className="pointer-events-none absolute inset-x-0 top-0 h-10 bg-gradient-to-b from-subtle to-transparent" aria-hidden />
+            </div>
+          </div>
+        )}
       </div>
       {!status.id.startsWith("pending-") && (
         <button

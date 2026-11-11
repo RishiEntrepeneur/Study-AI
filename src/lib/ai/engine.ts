@@ -4,30 +4,58 @@ import { and, asc, eq, inArray } from "drizzle-orm";
 import { read, schema, write } from "../db";
 import { replaceProjectCards } from "../data/study";
 import { parseContent } from "../data/projects";
-import type { GenerationProgress, OutputContent } from "../types";
+import type { GenerationProgress, GenerationProgressView, OutputContent, OutputType } from "../types";
 import { getAIConfig } from "./config";
 import { describeAIError } from "./errors";
-import { generateOutput } from "./generate";
+import { generateBatch, type BatchItem } from "./generate";
 import { isAbortError } from "./ollama";
 
 /**
  * In-process job queue. A local model can only do one thing at a time well,
- * so outputs are generated one after another. Status lives in the database;
- * live progress (token counts) lives in memory.
+ * so projects are worked on one after another. All the outputs queued for a
+ * project are made together (see generateBatch), which lets the model read
+ * the material once instead of once per output. Status lives in the
+ * database; live progress lives in memory.
  */
 
-const CONCURRENCY = 1;
-const TRANSIENT_RETRY_DELAYS_MS = [5_000, 15_000];
-
 interface ActiveJob {
+  type: OutputType;
   abort: AbortController;
   progress: GenerationProgress;
+}
+
+const ITEM_PATTERNS: Partial<Record<OutputType, RegExp>> = {
+  flashcards: /"answer"\s*:/g,
+  quiz: /"explanation"\s*:/g,
+  terms: /"definition"\s*:/g,
+};
+
+/** Turn raw progress into what the browser needs (no raw JSON, just counts or a readable preview). */
+export function progressView(type: OutputType, p: GenerationProgress): GenerationProgressView {
+  const view: GenerationProgressView = { tokens: p.tokens, part: p.part, parts: p.parts, note: p.note };
+  const text = p.text ?? "";
+  if (!text) return view;
+  if (type === "notes" || type === "cheatsheet") {
+    view.words = text.match(/\S+/g)?.length ?? 0;
+    const tail = text.length > 1_500 ? `…${text.slice(-1_500).replace(/^\S*\s/, "")}` : text;
+    // Easier to read than raw Markdown: drop heading marks and bold/italic stars, show bullets as dots.
+    view.preview = tail
+      .replace(/^#{1,6}\s+/gm, "")
+      .replace(/\*\*([^*\n]+)\*\*/g, "$1")
+      .replace(/(^|[\s(])\*([^*\n]+)\*/g, "$1$2")
+      .replace(/^(\s*)[-*]\s+/gm, "$1• ");
+  } else if (ITEM_PATTERNS[type]) {
+    view.items = text.match(ITEM_PATTERNS[type]!)?.length ?? 0;
+  }
+  return view;
 }
 
 class GenerationEngine {
   private queue: string[] = [];
   private active = new Map<string, ActiveJob>();
-  private running = 0;
+  private running = false;
+  /** The output the model is writing right now. */
+  private current: string | null = null;
   private resumed: Promise<void> | null = null;
 
   /** Re-queue work interrupted by a restart, once per process. */
@@ -64,18 +92,19 @@ class GenerationEngine {
   }
 
   private pump() {
-    while (this.running < CONCURRENCY && this.queue.length) {
-      const id = this.queue.shift()!;
-      this.running++;
-      void this.run(id).finally(() => {
-        this.running--;
+    if (this.running || !this.queue.length) return;
+    this.running = true;
+    void this.runNext()
+      .catch((err) => console.error("[study-suite] generation queue error", err))
+      .finally(() => {
+        this.running = false;
         this.pump();
       });
-    }
   }
 
-  progress(id: string): GenerationProgress | null {
-    return this.active.get(id)?.progress ?? null;
+  progress(id: string): GenerationProgressView | null {
+    const job = this.active.get(id);
+    return job ? progressView(job.type, job.progress) : null;
   }
 
   isQueuedOrActive(id: string): boolean {
@@ -88,7 +117,9 @@ class GenerationEngine {
     const job = this.active.get(id);
     if (job) {
       job.abort.abort();
-      return; // run() records the cancellation
+      if (this.current === id) return; // the model call stops and the batch records it
+      // Still waiting for its turn: settle it now (the batch skips it later).
+      this.active.delete(id);
     }
     await write((db) =>
       db
@@ -99,12 +130,22 @@ class GenerationEngine {
     );
   }
 
-  private async run(id: string): Promise<void> {
+  /** Take the next queued output, plus every other output queued for the same project, and make them together. */
+  private async runNext(): Promise<void> {
+    const firstId = this.queue.shift();
+    if (!firstId) return;
     const job = await read((db) => {
-      const generation = db.select().from(schema.generations).where(eq(schema.generations.id, id)).get();
-      if (!generation || generation.status !== "queued") return null;
-      const project = db.select().from(schema.projects).where(eq(schema.projects.id, generation.projectId)).get();
+      const first = db.select().from(schema.generations).where(eq(schema.generations.id, firstId)).get();
+      if (!first || first.status !== "queued") return null;
+      const project = db.select().from(schema.projects).where(eq(schema.projects.id, first.projectId)).get();
       if (!project) return null;
+      const siblings = this.queue.length
+        ? db
+            .select()
+            .from(schema.generations)
+            .where(and(eq(schema.generations.projectId, project.id), eq(schema.generations.status, "queued"), inArray(schema.generations.id, this.queue)))
+            .all()
+        : [];
       const materials = db
         .select({ name: schema.materials.name, content: schema.materials.content })
         .from(schema.materials)
@@ -116,17 +157,18 @@ class GenerationEngine {
         .from(schema.generations)
         .where(and(eq(schema.generations.projectId, project.id), eq(schema.generations.type, "notes")))
         .get();
-      return { generation, project, materials, notes };
+      return { generations: [first, ...siblings], project, materials, notes };
     });
     if (!job) return;
 
-    const { generation, project, materials } = job;
-    const abort = new AbortController();
-    const active: ActiveJob = { abort, progress: { tokens: 0, part: 1, parts: 1 } };
-    this.active.set(id, active);
-
+    const { generations, project, materials } = job;
+    const ids = generations.map((g) => g.id);
+    this.queue = this.queue.filter((q) => !ids.includes(q));
+    for (const g of generations) {
+      this.active.set(g.id, { type: g.type, abort: new AbortController(), progress: { tokens: 0, part: 1, parts: 1, note: "Waiting for its turn…" } });
+    }
     await write((db) =>
-      db.update(schema.generations).set({ status: "running", startedAt: new Date(), error: null }).where(eq(schema.generations.id, id)).run(),
+      db.update(schema.generations).set({ status: "running", startedAt: new Date(), error: null }).where(inArray(schema.generations.id, ids)).run(),
     );
 
     const cfg = getAIConfig();
@@ -135,58 +177,56 @@ class GenerationEngine {
         ? (materials[0]?.content ?? "")
         : materials.map((m) => `## Source: ${m.name}\n\n${m.content}`).join("\n\n");
 
-    try {
-      let content: OutputContent | null = null;
-      for (let attempt = 0; ; attempt++) {
-        try {
-          content = await generateOutput({
-            cfg,
-            type: generation.type,
-            tier: project.tier,
-            title: project.title,
-            topic: project.topic,
-            materialText,
-            notesMarkdown: parseContent(job.notes, "notes")?.markdown,
-            signal: abort.signal,
-            onProgress: (p) => {
-              active.progress = { ...p, note: undefined };
-            },
-          });
-          break;
-        } catch (err) {
-          const described = describeAIError(err, cfg.model);
-          const delay = TRANSIENT_RETRY_DELAYS_MS[attempt];
-          if (!described.transient || delay === undefined || abort.signal.aborted) throw err;
-          active.progress = { ...active.progress, tokens: 0, note: "Waiting for the AI server…" };
-          await new Promise<void>((resolve) => {
-            const t = setTimeout(resolve, delay);
-            abort.signal.addEventListener("abort", () => (clearTimeout(t), resolve()), { once: true });
-          });
-          abort.signal.throwIfAborted();
-        }
-      }
-
-      if (content?.type === "flashcards") await replaceProjectCards(project.id, content.cards);
+    const finish = async (id: string, values: Partial<typeof schema.generations.$inferInsert>) => {
+      this.active.delete(id);
+      if (this.current === id) this.current = null;
       await write((db) => {
-        db.update(schema.generations)
-          .set({ status: "done", content: JSON.stringify(content), error: null, finishedAt: new Date() })
-          .where(eq(schema.generations.id, id))
-          .run();
-        db.update(schema.projects).set({ updatedAt: new Date() }).where(eq(schema.projects.id, project.id)).run();
+        db.update(schema.generations).set({ ...values, finishedAt: new Date() }).where(eq(schema.generations.id, id)).run();
+        if (values.status === "done") db.update(schema.projects).set({ updatedAt: new Date() }).where(eq(schema.projects.id, project.id)).run();
+      });
+    };
+
+    const items: BatchItem[] = generations.map((g) => {
+      const active = this.active.get(g.id)!;
+      return {
+        type: g.type,
+        signal: active.abort.signal,
+        onProgress: (p) => {
+          active.progress = p;
+          if (p.text !== undefined) this.current = g.id;
+        },
+        onDone: async (content: OutputContent) => {
+          if (content.type === "flashcards") await replaceProjectCards(project.id, content.cards);
+          await finish(g.id, { status: "done", content: JSON.stringify(content), error: null });
+        },
+        onFailed: async (err) => {
+          if (!this.active.has(g.id) && active.abort.signal.aborted) return; // already settled by cancel()
+          const cancelled = active.abort.signal.aborted || isAbortError(err);
+          const message = cancelled ? null : describeAIError(err, cfg.model).message;
+          if (!cancelled) console.warn(`[study-suite] ${g.type} for project ${project.id} failed: ${message}`);
+          await finish(g.id, { status: cancelled ? "cancelled" : "error", error: message });
+        },
+      };
+    });
+
+    try {
+      await generateBatch({
+        cfg,
+        tier: project.tier,
+        title: project.title,
+        topic: project.topic,
+        materialText,
+        existingNotes: parseContent(job.notes, "notes")?.markdown,
+        items,
       });
     } catch (err) {
-      const cancelled = abort.signal.aborted || isAbortError(err);
-      const message = cancelled ? null : describeAIError(err, cfg.model).message;
-      if (!cancelled) console.warn(`[study-suite] ${generation.type} for project ${project.id} failed: ${message}`);
-      await write((db) =>
-        db
-          .update(schema.generations)
-          .set({ status: cancelled ? "cancelled" : "error", error: message, finishedAt: new Date() })
-          .where(eq(schema.generations.id, id))
-          .run(),
-      );
+      console.error("[study-suite] batch failed", err);
     } finally {
-      this.active.delete(id);
+      // Anything the batch didn't settle (an unexpected crash) is marked as failed, never left "running".
+      for (const [i, g] of generations.entries()) {
+        if (this.active.has(g.id)) await items[i].onFailed(new Error("Something went wrong while making this. Please try again."));
+      }
+      this.current = null;
     }
   }
 }
